@@ -30,6 +30,7 @@ While they work, a recorder saves everything the robot did and saw, in a format 
 | Recorder | `remote_hands/recorder.py`, `labels.py` | One episode per run: joints, actions, object positions, labels and two cameras. |
 | Dataset tools | `tools/export_lerobot.py`, `tools/draw_labels.py`, `tools/label_with_nemotron.py` | Export to the LeRobot v3 format, draw boxes from recorded positions, and ask NVIDIA Nemotron to describe the frames in words. |
 | Request understanding | `remote_hands/extractor.py` | Nemotron turns what the person asks for into an object for the robot, with a word-matching fallback. |
+| Crawl specialist | `crawling/` | Suit recordings retargeted to the G1, filtered with Nemotron, and used to fine-tune SONIC for crawling. |
 
 ![Through the robot's eyes, as the worker sees it](docs/headset_view.jpg)
 
@@ -45,6 +46,23 @@ Every control step, 30 times a second:
 - which frame of each camera belongs to that step (robot's eyes about 14 a second, the man's view about 5)
 
 ![Both recorded cameras with one step's numbers](docs/recorder_view.jpg)
+
+## What the suit data taught a robot: crawling
+
+`crawling/` is the second half of the project (by Ijtihed): SONIC, a whole-body controller for the Unitree G1,
+fine-tuned on crawl clips that include our own Rokoko suit recordings, with NVIDIA Nemotron filtering the clips.
+On the 26 crawl clips of the HumanTracker benchmark, scored with the benchmark's own evaluator:
+
+| Policy | Crawl clips completed (of 26) | Mean progress | Joint error (rad) |
+| --- | --- | --- | --- |
+| Humanoid-GPT | 0 | 15% | not measured on crawl |
+| SONIC 1.1 | 3 | 40% | 0.254 |
+| SONIC (released) | 9 | 55% | 0.260 |
+| **This model** | **18** | **80%** | **0.208** |
+
+It is a crawl specialist: on all 164 Ground clips it completes 27 against 32 for released SONIC, and how much of
+the gain comes from the suit data is not measured. `crawling/README.md` has the method, the limits and how to
+reproduce the score.
 
 ## Running it
 
@@ -86,7 +104,8 @@ Nemotron needs `NEMOTRON_API_KEY` (or `NVIDIA_API_KEY`) in a local `.env`, which
 - **Unreal content and assets.** The level, meshes and textures are rebuilt by the scripts from CC0 sources (Poly
   Haven models and textures, a MakeHuman / MPFB figure). The Unitree G1 model comes from its public URDF.
 - **Recordings and videos.** The suit recordings, the exported dataset and the demo video are too large for git.
-- **The crawling model.** The fine-tuning work on robot crawling was done by teammates and lives with them.
+- **The crawling model's weights, training clips and videos.** `crawling/` holds the scripts, the write-up and the
+  per-clip scores; the weights and data are too large for git.
 
 ## Honest limits
 
