@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Remote Hands: remote worker</title>
+<style>
+  :root { --bg:#f6f5f1; --card:#fff; --ink:#1d1d1b; --mute:#6b6a65; --line:#dcdad2; --accent:#1d6b54; --warn:#a3441e; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#161614; --card:#20201d; --ink:#eeede8; --mute:#a09f98; --line:#3a3935; --accent:#5dcaa5; --warn:#f0997b; } }
+  * { box-sizing: border-box; } [hidden] { display:none !important; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.5 system-ui, sans-serif; }
+  main { max-width:1100px; margin:0 auto; padding:16px; display:grid; gap:16px; grid-template-columns: minmax(0,3fr) minmax(0,2fr); }
+  @media (max-width: 800px) { main { grid-template-columns: 1fr; } }
+  header { grid-column:1/-1; display:flex; gap:12px; align-items:baseline; flex-wrap:wrap; }
+  h1 { font-size:20px; margin:0; font-weight:600; }
+  .pill { font-size:13px; padding:2px 10px; border:1px solid var(--line); border-radius:99px; color:var(--mute); }
+  .pill.on { color:var(--accent); border-color:var(--accent); }
+  section { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--mute); margin:0 0 8px; font-weight:600; }
+  #said { font-size:22px; margin:0 0 10px; min-height:1.5em; }
+  #view { position:relative; background:#000; border-radius:6px; overflow:hidden; min-height:200px; }
+  #view img { display:block; width:100%; }
+  #box { position:absolute; border:3px solid #ffd23f; box-shadow:0 0 0 2px rgba(0,0,0,.6); border-radius:4px; display:none; }
+  #box span { position:absolute; left:-3px; bottom:100%; background:#ffd23f; color:#111; font-size:13px; font-weight:600; padding:1px 6px; white-space:nowrap; }
+  #empty { color:#bbb; padding:70px 16px; text-align:center; }
+  pre { margin:0; font:13px/1.45 ui-monospace, monospace; white-space:pre-wrap; word-break:break-word; max-height:300px; overflow:auto; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; }
+  button { font:inherit; padding:10px 18px; border-radius:8px; border:1px solid var(--line); background:var(--card); color:var(--ink); cursor:pointer; }
+  button.go { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600; }
+  @media (prefers-color-scheme: dark) { button.go { color:#0c2a21; } }
+  button:disabled { opacity:.4; cursor:default; }
+  #state { font-size:18px; font-weight:600; }
+  #log { font-size:14px; color:var(--mute); max-height:180px; overflow:auto; margin:8px 0 0; padding:0; list-style:none; }
+  dl { display:grid; grid-template-columns:auto 1fr; gap:2px 12px; margin:0; font-size:14px; } dt { color:var(--mute); } dd { margin:0; }
+  .bad { color:var(--warn); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Remote Hands: remote worker</h1>
+    <span class="pill" id="p-server">server</span><span class="pill" id="p-wearer">caller</span><span class="pill" id="p-robot">robot link</span><span class="pill" id="p-node">robot telemetry</span>
+  </header>
+  <section>
+    <h2>The request</h2>
+    <p id="said">Waiting for a request.</p>
+    <div id="view"><div id="empty">No request yet</div><img id="frame" alt="The robot's view when the caller asked, with the requested object boxed" hidden><div id="box"><span id="boxlabel"></span></div></div>
+    <div class="row">
+      <button class="go" id="accept" disabled>Accept</button>
+      <button id="done" disabled>Done</button>
+      <button id="fail" disabled>Can't do it</button>
+    </div>
+  </section>
+  <section style="grid-column:1/-1">
+    <h2>Through the robot's eyes (live) <a href="/pov" target="_blank" style="text-transform:none; letter-spacing:0; font-weight:400">open full screen for the glasses call</a></h2>
+    <img id="pov" alt="Live view from the robot's head camera" style="width:100%; max-width:720px; display:block; border-radius:6px; background:#000; aspect-ratio:4/3; margin:0 auto">
+  </section>
+  <section style="grid-column:1/-1">
+    <h2>Map of the table (live)</h2>
+    <canvas id="ws" width="1040" height="420" style="width:100%; display:block; border-radius:6px; background:#11110f"></canvas>
+    <p style="margin:8px 0 0; font-size:14px; color:var(--mute)">Left: from above (robot at the bottom, looking up the page). Right: from the front (height). Filled circles are the robot's hands; hollow rings are where your hands are asking it to go.</p>
+  </section>
+  <div style="display:grid; gap:16px; align-content:start">
+    <section>
+      <h2>Request</h2>
+      <div id="state">idle</div>
+      <ul id="log"></ul>
+    </section>
+    <section>
+      <h2>Nemotron's reading of the request</h2>
+      <pre id="task">(nothing yet)</pre>
+    </section>
+    <section>
+      <h2>Robot</h2>
+      <dl>
+        <dt>mode</dt><dd id="r-state">not connected</dd>
+        <dt>safety</dt><dd id="r-safety">-</dd>
+        <dt>hand to target</dt><dd id="r-lag">-</dd>
+        <dt>target object</dt><dd id="r-target">-</dd>
+        <dt>clutch</dt><dd><button id="clutch" disabled>-</button> <small>space bar</small></dd>
+        <dt>grasp assist</dt><dd id="r-assist">-</dd>
+      </dl>
+    </section>
+  </div>
+</main>
+<script>
+const q = new URLSearchParams(location.search);
+const session = q.get("session") || "default";
+const nodeUrl = q.get("node") || "ws://" + (location.hostname || "127.0.0.1") + ":8765";
+const $ = id => document.getElementById(id);
+let ws, size = null;
+function pill(id, on) { $(id).classList.toggle("on", !!on); }
+function log(text) { const li = document.createElement("li"); li.textContent = new Date().toLocaleTimeString() + "  " + text; $("log").prepend(li); }
+function buttons(state) {
+  $("accept").disabled = state !== "offered";
+  $("done").disabled = !(state === "accepted" || state === "in_progress");
+  $("fail").disabled = !(state === "offered" || state === "accepted" || state === "in_progress");
+}
+function placeBox(b) {
+  const img = $("frame");
+  if (!b || !img.naturalWidth) { $("box").style.display = "none"; return; }
+  const sx = img.clientWidth / img.naturalWidth, sy = img.clientHeight / img.naturalHeight;
+  Object.assign($("box").style, { display:"block", left:b[0]*sx+"px", top:b[1]*sy+"px", width:(b[2]-b[0])*sx+"px", height:(b[3]-b[1])*sy+"px" });
+}
+let box = null;
+addEventListener("resize", () => placeBox(box));
+function clearRequest() { $("frame").hidden = true; $("frame").removeAttribute("src"); $("empty").hidden = false; box = null; placeBox(null); }
+function connect() {
+  ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws/helper?session=" + encodeURIComponent(session));
+  ws.onopen = () => pill("p-server", true);
+  ws.onclose = () => { pill("p-server", false); setTimeout(connect, 1000); };
+  ws.onmessage = ev => {
+    const m = JSON.parse(ev.data);
+    if (m.type === "presence") { pill("p-wearer", m.wearer > 0); pill("p-robot", m.robot > 0); $("state").textContent = m.state; buttons(m.state); }
+    else if (m.type === "task") {
+      $("said").textContent = "“" + m.text + "”" + (m.instruction ? "  →  " + m.instruction : "");
+      const shown = Object.assign({}, m); delete shown.frame_jpeg_b64; delete shown.type;
+      $("task").textContent = JSON.stringify(shown, null, 2);
+      if (m.frame_jpeg_b64) {
+        box = m.target ? m.target.box_xyxy : null;
+        $("boxlabel").textContent = nameOf(m.target);
+        $("frame").onload = () => placeBox(box);
+        $("frame").src = "data:image/jpeg;base64," + m.frame_jpeg_b64; $("frame").hidden = false; $("empty").hidden = true;
+      }
+    }
+    else if (m.type === "status") {
+      $("state").textContent = m.state; buttons(m.state); log(m.state + (m.say ? ": " + m.say : ""));
+      if (m.state === "done" || m.state === "failed") { clearRequest(); buttons("idle"); }
+    }
+    else if (m.type === "progress") log("robot: " + m.state);
+  };
+}
+function send(state) { ws.send(JSON.stringify({ type:"status", state })); }
+$("accept").onclick = () => send("accepted");
+$("done").onclick = () => send("done");
+$("fail").onclick = () => send("failed");
+let node = null, clutchOn = null;
+function toggleClutch() { if (node && node.readyState === 1 && clutchOn !== null) node.send(JSON.stringify({ type:"clutch", on: !clutchOn })); }
+$("clutch").onclick = toggleClutch;
+addEventListener("keydown", e => { if (e.code === "Space" || e.code === "PageDown") { e.preventDefault(); toggleClutch(); } });
+const COL = { red:"#e0453a", yellow:"#f0c62a", blue:"#3f7de0", white:"#f2f1ea", green:"#2f9a55" };
+const nameOf = x => x ? (x.name || x.item || (x.color + " " + x.shape)) : "";
+function draw(t) {
+  const c = $("ws"), g = c.getContext("2d"), W = c.width, H = c.height;
+  g.clearRect(0, 0, W, H); g.font = "13px system-ui"; g.lineWidth = 2;
+  if (!t.view) return;
+  const S = 560;                                   // pixels per metre
+  // top view: robot y (left) -> screen left; robot x (forward) -> screen up
+  const tx = y => 300 - y * S, ty = x => H - 20 - (x - 0.05) * S;
+  // front view: robot y -> screen (mirrored so it matches the top view), z up
+  const fx = y => 800 - y * 420, fz = z => H - 60 - (z - t.view.counter_z) * 900;
+  g.fillStyle = "#8a8980"; g.fillText("from above", 12, 18); g.fillText("from the front", 612, 18);
+  g.fillStyle = "#2a2a26"; g.fillRect(tx(0.5), ty(0.66), S, 0.52 * S);            // counter
+  g.fillRect(fx(0.5), fz(t.view.counter_z), 420, 6);
+  for (const [name, b] of Object.entries(t.view.bins)) {
+    const dest = t.task_target && (t.task_target.destination || "").startsWith(name);
+    g.strokeStyle = dest ? "#ffd23f" : "#8fa0b8";
+    g.strokeRect(tx(b[1] + b[3]), ty(b[0] + b[2]), 2 * b[3] * S, 2 * b[2] * S);
+    g.strokeRect(fx(b[1] + b[3]), fz(t.view.counter_z + 0.06), 2 * b[3] * 420, 0.06 * 900);
+    g.fillStyle = g.strokeStyle; g.fillText("tray" + (dest ? " (put it here)" : ""), tx(b[1] + b[3]) + 4, ty(b[0] + b[2]) + 16);
+  }
+  if (t.view.handover) {                       // where to hold the item out for the person
+    const hv = t.view.handover;
+    g.strokeStyle = g.fillStyle = "#ffd23f";
+    g.beginPath(); g.arc(tx(hv[1]), ty(hv[0]), 14, 0, 7); g.stroke();
+    g.beginPath(); g.arc(fx(hv[1]), fz(hv[2]), 10, 0, 7); g.stroke();
+    g.fillText("hand it over here", tx(hv[1]) - 40, ty(hv[0]) - 20);
+  }
+  for (const o of t.objects || []) {
+    const want = t.task_target && o.color === t.task_target.color && o.shape === t.task_target.shape;
+    g.fillStyle = COL[o.color] || "#999";
+    for (const [x, y, r] of [[tx(o.pos[1]), ty(o.pos[0]), 12], [fx(o.pos[1]), fz(o.pos[2]), 10]]) {
+      g.beginPath();
+      if (o.shape === "cylinder") g.arc(x, y, r, 0, 7);
+      else if (o.shape === "triangle") { g.moveTo(x, y - r); g.lineTo(x + r, y + r); g.lineTo(x - r, y + r); g.closePath(); }
+      else g.rect(x - r, y - r, 2 * r, 2 * r);
+      g.fill();
+      if (want) { g.strokeStyle = "#ffd23f"; g.beginPath(); g.arc(x, y, r + 8, 0, 7); g.stroke(); }
+    }
+    g.fillStyle = want ? "#ffd23f" : "#8a8980"; g.fillText(nameOf(o), tx(o.pos[1]) - 24, ty(o.pos[0]) + 30);
+  }
+  for (const s of ["left", "right"]) {
+    const h = t.hands && t.hands[s], q = t.target && t.target[s];
+    const col = s === "left" ? "#5dcaa5" : "#c59bf5";
+    if (q) { g.strokeStyle = col; g.setLineDash([4, 4]);
+      g.beginPath(); g.arc(tx(q[1]), ty(q[0]), 16, 0, 7); g.stroke();
+      g.beginPath(); g.arc(fx(q[1]), fz(q[2]), 14, 0, 7); g.stroke(); g.setLineDash([]); }
+    if (h) { g.fillStyle = col; const r = t.closed && t.closed[s] ? 7 : 11;
+      g.beginPath(); g.arc(tx(h[1]), ty(h[0]), r, 0, 7); g.fill();
+      g.beginPath(); g.arc(fx(h[1]), fz(h[2]), r, 0, 7); g.fill();
+      g.fillText(s + " " + Math.round((h[2] - t.view.counter_z) * 100) + " cm up" + (t.closed && t.closed[s] ? ", closed" : ""), tx(h[1]) + 16, ty(h[0]) + 4); }
+  }
+  g.fillStyle = "#8a8980"; g.fillText("robot", tx(0) - 16, H - 4);
+}
+function connectNode() {
+  let n; try { n = new WebSocket(nodeUrl); } catch (e) { return; }
+  node = n;
+  n.onopen = () => pill("p-node", true);
+  n.onclose = () => { pill("p-node", false); $("r-state").textContent = "not connected"; setTimeout(connectNode, 2000); };
+  n.onmessage = ev => {
+    const t = JSON.parse(ev.data);
+    if (t.type === "pov") { $("pov").src = "data:image/jpeg;base64," + t.jpeg_b64; ev.target.send('{"type":"pov_ack"}'); return; }
+    if (t.type !== "telemetry") return;
+    $("r-state").textContent = t.state; draw(t);
+    clutchOn = !!t.clutch_on; $("clutch").disabled = false;
+    $("clutch").textContent = clutchOn ? "ON: robot follows you" : "OFF: robot holds";
+    $("r-safety").textContent = t.safety_mode + (t.clipped_steps ? " (" + t.clipped_steps + " clipped)" : "");
+    $("r-safety").className = t.safety_mode === "ok" ? "" : "bad";
+    $("r-lag").textContent = t.lag_cm == null ? "-" : t.lag_cm.toFixed(1) + " cm behind your hand";
+    const A = { free:"waiting: bring a hand near the object", approach:"taking over: moving above the object", descend:"lowering onto the object", closing:"closing the hand", holding:"holding: carry it to the highlighted tray", releasing:"letting go", done:"placed" };
+    $("r-assist").textContent = t.assist ? (A[t.assist.state] || t.assist.state) + (t.assist.side ? " (" + t.assist.side + " hand)" : "") : "-";
+    $("r-target").textContent = t.task_target ? nameOf(t.task_target) : "-";
+  };
+}
+connect(); connectNode();
+</script>
+</body>
+</html>

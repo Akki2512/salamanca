@@ -1,0 +1,59 @@
+# Remote Hands home scene: a wooden table at home with a few everyday things and one serving tray.
+# Same file format and frames as the simulator's own scene file (see its comments); the table geometry is the
+# same, so the robot's reach and safety limits are unchanged. Only what is ON the table differs.
+#   mat frame: origin at the table corner on the robot's right, x towards the robot's left, y away from it.
+
+version: 1
+
+counter:
+  mat_origin_in_pelvis: [0.14, -0.45, 0.01]
+  mat_size: [0.90, 0.50]
+  counter_size: [1.10, 0.60]
+  grid_cm: 5
+  mat_texture: mat_texture.png                # in the pod copy this file is replaced by a wood texture
+
+objects:
+  # Every item is 45 mm wide (the width the hand's grasp was tuned for). Which thing an item is comes from
+  # its colour + shape: see remote_hands/home.py ITEMS.
+  size: 0.045
+  height_ratio: 1.0
+  fillet: 0.0025
+  shapes: [cube, cylinder]
+  colors:
+    white: [238, 238, 232]                    # pill bottle (cylinder)
+    red: [200, 30, 30]                        # soda can (cylinder)
+    blue: [30, 70, 200]                       # cup (cylinder)
+    yellow: [235, 200, 20]                    # tea box (cube)
+    green: [40, 150, 70]                      # juice box (cube)
+  copies_per_type: 2                          # the simulator's start-up layout may ask for two of a kind
+
+lid:                                          # unused here; the simulator's loader expects the section
+  bin: center
+  thickness: 0.003
+  hole_clearance: 0.010
+
+bins:                                         # unused: things are handed to the person (remote_hands/home.py HANDOVER).
+  outer_size: [0.21, 0.21]                    # The simulator code needs the section, so one is kept far off the table.
+  wall_height: 0.025
+  wall_thickness: 0.003
+  floor_thickness: 0.003
+  rgb: [70, 80, 95]
+  centers:
+    center: [5.0, 5.0]
+
+layout:
+  region_x: [0.28, 0.62]
+  region_y: [0.12, 0.19]
+  min_spacing: 0.08
+  n_cubes: [3, 5]
+  yaw_range_deg: [-45, 45]
+
+success:
+  at_rest_speed: 0.02
+  inside_margin: 0.0
+  off_counter_drop: 0.03
+
+scoring:                                      # unused here; kept so the simulator's loader finds the keys
+  sort_fixed:    {"correct": 1, "wrong": -1, "counter": 0, "off": -1}
+  sort_language: {"correct": 2, "wrong": -1, "counter": 0, "off": -1}
+  insert_shapes: {"inserted": 3, "forced": -1, "dropped": -1, "wrong_hole": 0, "counter": 0, "off": 0}

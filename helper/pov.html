@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Robot view</title>
+<style>
+  html, body { margin:0; height:100%; background:#000; color:#fff; font:16px system-ui, sans-serif; overflow:hidden; }
+  img { position:fixed; inset:0; width:100%; height:100%; object-fit:contain; }
+  #bar { position:fixed; left:0; right:0; bottom:0; padding:10px 16px; background:rgba(0,0,0,.6); display:flex; gap:16px; font-size:20px; }
+  #task { font-weight:600; color:#ffd23f; }
+  #off { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; color:#aaa; }
+</style>
+</head>
+<body>
+<!-- Full-screen robot camera for the remote worker: show this on the phone that is in the video call to the glasses. -->
+<div id="off">Waiting for the robot's camera…</div>
+<img id="pov" alt="What the robot's head camera sees" hidden>
+<div id="bar"><span id="task"></span><span id="state"></span></div>
+<script>
+const q = new URLSearchParams(location.search);
+const nodeUrl = q.get("node") || "ws://" + (location.hostname || "127.0.0.1") + ":8765";
+const $ = id => document.getElementById(id);
+const A = { free:"bring a hand near it", approach:"moving above it", descend:"lowering", closing:"closing the hand", holding:"holding: bring it over", releasing:"letting go", done:"done" };
+function connect() {
+  let n; try { n = new WebSocket(nodeUrl); } catch (e) { return; }
+  n.onclose = () => { $("pov").hidden = true; $("off").hidden = false; setTimeout(connect, 1500); };
+  n.onmessage = ev => {
+    const m = JSON.parse(ev.data);
+    if (m.type === "pov") { $("pov").src = "data:image/jpeg;base64," + m.jpeg_b64; $("pov").hidden = false; $("off").hidden = true; n.send('{"type":"pov_ack"}'); }
+    else if (m.type === "telemetry") {
+      const t = m.task_target;
+      $("task").textContent = t ? "Fetch: " + t.color + " " + t.shape : "";
+      $("state").textContent = (m.clutch_on ? "" : "paused · ") + (m.assist ? (A[m.assist.state] || "") : (m.state === "driving" ? "following you" : "holding"));
+    }
+  };
+}
+connect();
+</script>
+</body>
+</html>

@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Robot view (mirror)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { margin:0; height:100%; background:#000; color:#ddd; font:15px system-ui, sans-serif; overflow:hidden; }
+  #views { position:fixed; inset:0 0 214px 0; display:flex; gap:6px; align-items:center; justify-content:center; }
+  #views figure { margin:0; flex:1 1 0; min-width:0; height:100%; display:flex; flex-direction:column; }
+  #views img { flex:1 1 0; min-height:0; width:100%; object-fit:contain; background:#050505; }
+  #views .pic { position:relative; flex:1 1 0; min-height:0; display:flex; }
+  #views .pic canvas { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
+  body.noboxes #boxes { display:none; }
+  body.nodata #strip { display:none; }  body.nodata #views { inset:0 0 52px 0; }
+  #strip { position:fixed; left:0; right:0; bottom:56px; height:154px; display:flex; gap:22px; padding:8px 18px; box-sizing:border-box;
+           background:#06090b; border-top:1px solid #1d2a2c; font:13px ui-monospace, Menlo, monospace; color:#cfd8dc; }
+  #strip .col { display:flex; flex-direction:column; gap:4px; min-width:0; }
+  #strip h4 { margin:0 0 2px; font:600 11px system-ui, sans-serif; letter-spacing:.09em; text-transform:uppercase; color:#16968a; }
+  #strip .k { color:#78909c; } #strip .hot { color:#e29434; } #strip .live { color:#3ddc97; }
+  #joints { flex:1 1 0; min-width:260px; } #joints canvas { width:100%; height:112px; }
+  #facts { width:300px; } #things { width:330px; } #strip .row { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #views figcaption { text-align:center; padding:6px 0 2px; color:#bbb; letter-spacing:.04em; text-transform:uppercase; font-size:12px; }
+  body.one #manfig { display:none; }
+  #bar { position:fixed; left:16px; bottom:14px; right:16px; display:flex; gap:14px; align-items:center; pointer-events:none; }
+  #bar span { background:rgba(0,0,0,.6); padding:6px 12px; border-radius:8px; }
+  #what { font-size:20px; font-weight:600; color:#fff; }
+  #rec { margin-left:auto; background:#555 !important; }
+  #reset { background:#933 !important; }
+  #rec[disabled] { background:#444 !important; color:#999; cursor:default; }
+  #rec.on { background:#b22 !important; }
+  #rec.on::before { content:""; display:inline-block; width:10px; height:10px; border-radius:50%; background:#f33; box-shadow:0 0 6px #f33; margin-right:8px; }
+  #sound, #reset, #rec { pointer-events:auto; cursor:pointer; background:#2a6; color:#fff; border:0; border-radius:8px; padding:7px 12px; font:inherit; }
+</style></head><body>
+<!-- What the worker sees in the headset, on this screen: the same pictures from Unreal (the robot's eyes, turned
+     the way the worker's head is turned), asked for without a head direction so this page never steers the view. -->
+<div id="views">
+  <figure><div class="pic"><img id="eyes" alt="the robot's view"><canvas id="boxes"></canvas></div><figcaption>Robot · what the worker sees in the headset · boxes from the recorded positions, not vision</figcaption></figure>
+  <figure id="manfig"><img id="man" alt="the man's view"><figcaption>The man in the wheelchair · his view</figcaption></figure>
+</div>
+<!-- The data under the pictures: what one step of a recording holds, live. B hides the boxes, D hides this strip. -->
+<div id="strip">
+  <div class="col" id="facts"><h4>This step</h4><div class="row" id="f_rec"></div><div class="row" id="f_phase"></div><div class="row" id="f_base"></div><div class="row" id="f_suit"></div><div class="row" id="f_head"></div></div>
+  <div class="col" id="joints"><h4>Robot joints · 14 arm · 12 leg · 3 waist (radians)</h4><canvas id="bars"></canvas></div>
+  <div class="col" id="things"><h4>Things in the room</h4><div id="t_list"></div></div>
+</div>
+<div id="bar"><span id="what">waiting for Unreal…</span><span id="story"></span><span id="rate"></span><button id="sound">Turn sound on</button><button id="rec" disabled title="start the robot node with --record DIR">Record</button><button id="reset">Reset scene</button></div>
+<script>
+const $ = id => document.getElementById(id);
+const host = location.hostname || "127.0.0.1";
+const eyesUrl = "http://" + host + ":8011/eyes.jpg", manUrl = "http://" + host + ":8011/person.jpg", nodeUrl = "ws://" + host + ":8765";
+let shown = 0, t0 = performance.now();
+// The frame comes with the direction it was rendered in (X-Head: yaw to the left of the way the robot faces, pitch up,
+// horizontal field of view, aspect; or "flat" when no headset is steering): the boxes need that.
+let head = null, tel = null;
+async function next() {                 // one picture after another, as fast as they arrive
+  try {
+    const r = await fetch(eyesUrl + "?t=" + Date.now(), { cache: "no-store" });
+    if (!r.ok) throw new Error(r.status);
+    const tag = (r.headers.get("X-Head") || "flat").split(",").map(Number);
+    const url = URL.createObjectURL(await r.blob()), im = $("eyes"), old = im.dataset.url;
+    im.onload = () => { if (old) URL.revokeObjectURL(old); drawBoxes(); };
+    // no headset: the camera's own mount on the robot's head, which looks down at the table (about 48 degrees; approximate)
+    head = tag.length === 4 && !isNaN(tag[0]) ? { yaw: tag[0], pitch: tag[1], fov: tag[2], flat: false } : { yaw: 0, pitch: -48, fov: 90, flat: true };
+    im.dataset.url = url; im.src = url; shown++;
+    setTimeout(next, 15);
+  } catch (e) { $("what").textContent = "no picture from Unreal (is the editor open on HomeBedroom?)"; setTimeout(next, 500); }
+}
+next();
+
+// ---- boxes round the things in the robot's view. The same sums as remote_hands/labels.py: the node says where the
+// camera and every item are in the room (telemetry "viz"), the frame says which way the camera looked.
+const rad = Math.PI / 180, TEAL = "#1fc7b6", AMBER = "#e29434";
+function camera() {
+  if (!head || !tel || !tel.viz || !tel.viz.eye) return null;
+  const h = tel.base[2] + head.yaw * rad, p = head.pitch * rad, ch = Math.cos(h), sh = Math.sin(h), cp = Math.cos(p), sp = Math.sin(p);
+  return { eye: tel.viz.eye, f: [ch * cp, sh * cp, sp], l: [-sh, ch, 0], u: [-ch * sp, -sh * sp, cp], fov: head.fov * rad };
+}
+function project(pt, cam, w, hgt) {
+  const d = [pt[0] - cam.eye[0], pt[1] - cam.eye[1], pt[2] - cam.eye[2]], dot = v => d[0] * v[0] + d[1] * v[1] + d[2] * v[2];
+  const depth = dot(cam.f); if (depth < 0.05) return null;
+  const f = 0.5 * w / Math.tan(0.5 * cam.fov);
+  return [0.5 * w - f * dot(cam.l) / depth, 0.5 * hgt - f * dot(cam.u) / depth, depth];
+}
+function roll(x, y, r, z0, z1) { const o = []; for (let k = 0; k < 16; k++) { const a = k * Math.PI / 8; for (const z of [z0, z1]) o.push([x + r * Math.cos(a), y + r * Math.sin(a), z]); } return o; }
+function around(name, centre, pts, held, cam, w, hgt) {
+  const c = project(centre, cam, w, hgt); if (!c) return null;
+  const uv = pts.map(q => project(q, cam, w, hgt)).filter(Boolean); if (!uv.length) return null;
+  const x0 = Math.min(...uv.map(q => q[0])), x1 = Math.max(...uv.map(q => q[0])), y0 = Math.min(...uv.map(q => q[1])), y1 = Math.max(...uv.map(q => q[1]));
+  if (Math.min(x1, w) <= Math.max(x0, 0) || Math.min(y1, hgt) <= Math.max(y0, 0)) return null;
+  return { name, held, depth: c[2], box: [Math.max(x0, 0), Math.max(y0, 0), Math.min(x1, w), Math.min(y1, hgt)] };
+}
+function boxesNow(w, hgt) {
+  const cam = camera(); if (!cam) return [];
+  const out = [];
+  for (const it of tel.viz.items || []) {
+    const [x, y, z] = it.pos;
+    if (it.name === "sweater") {
+      if (it.held_by) { const lo = Math.max(z - 0.70, 0), hi = z + 0.05; out.push(around(it.name, [x, y, (lo + hi) / 2], roll(x, y, 0.18, lo, hi), it.held_by, cam, w, hgt)); }
+      else { const b = Math.max(z - 0.07, 0); out.push(around(it.name, [x, y, b + 0.05], roll(x, y, it.radius, b, b + 0.10), null, cam, w, hgt)); }
+    } else if (it.radius) {
+      const c = [x + it.aim[0], y + it.aim[1], z + it.aim[2]], pc = project(c, cam, w, hgt);
+      if (pc) { const half = 0.5 * w / Math.tan(0.5 * cam.fov) * it.radius / pc[2];
+        if (pc[0] + half > 0 && pc[0] - half < w && pc[1] + half > 0 && pc[1] - half < hgt)
+          out.push({ name: it.name, held: it.held_by, depth: pc[2], box: [Math.max(pc[0] - half, 0), Math.max(pc[1] - half, 0), Math.min(pc[0] + half, w), Math.min(pc[1] + half, hgt)] }); }
+    }
+  }
+  const sc = tel.scene || {};
+  if (sc.chair) { const bed = sc.man === "bed" || sc.phase === "bed", top = bed ? 0.95 : 1.30;
+    out.push(around(bed ? "wheelchair" : "man in wheelchair", [sc.chair[0], sc.chair[1], top / 2], roll(sc.chair[0], sc.chair[1], 0.40, 0, top), null, cam, w, hgt)); }
+  return out.filter(Boolean);
+}
+function drawBoxes() {
+  const im = $("eyes"), cv = $("boxes"), w = im.naturalWidth, hgt = im.naturalHeight; if (!w) return;
+  const dpr = devicePixelRatio || 1, cw = cv.clientWidth, chh = cv.clientHeight;
+  if (cv.width !== Math.round(cw * dpr) || cv.height !== Math.round(chh * dpr)) { cv.width = Math.round(cw * dpr); cv.height = Math.round(chh * dpr); }
+  const g = cv.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, cw, chh);
+  const k = Math.min(cw / w, chh / hgt), ox = (cw - w * k) / 2, oy = (chh - hgt * k) / 2;       // the picture is fitted inside its space
+  g.font = "600 13px system-ui, sans-serif"; g.textBaseline = "bottom";
+  for (const b of boxesNow(w, hgt).sort((p, q) => q.depth - p.depth)) {
+    const col = b.held ? AMBER : TEAL, x = ox + b.box[0] * k, y = oy + b.box[1] * k, bw = (b.box[2] - b.box[0]) * k, bh = (b.box[3] - b.box[1]) * k;
+    g.strokeStyle = col; g.lineWidth = 2; g.strokeRect(x, y, bw, bh);
+    const text = b.name + (b.held ? " · held, " + b.held + " hand" : "") + " · " + b.depth.toFixed(1) + " m", tw = g.measureText(text).width + 12;
+    const ty = y > 22 ? y : y + bh + 20;
+    g.fillStyle = col; g.fillRect(x - 1, ty - 19, tw, 19); g.fillStyle = "#06090b"; g.fillText(text, x + 5, ty - 3);
+  }
+}
+// ---- the strip of numbers
+function bars() {
+  const cv = $("bars"), dpr = devicePixelRatio || 1, cw = cv.clientWidth, chh = cv.clientHeight; if (!cw || !tel) return;
+  if (cv.width !== Math.round(cw * dpr)) { cv.width = Math.round(cw * dpr); cv.height = Math.round(chh * dpr); }
+  const g = cv.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, cw, chh);
+  const v = tel.viz || {}, groups = [["left arm", (tel.q_cmd || []).slice(0, 7)], ["right arm", (tel.q_cmd || []).slice(7, 14)], ["left leg", (v.leg_q || []).slice(0, 6)], ["right leg", (v.leg_q || []).slice(6, 12)], ["waist", v.waist_q || []]];
+  const n = groups.reduce((a, q) => a + q[1].length, 0) + groups.length - 1, step = cw / Math.max(n, 1), mid = (chh - 16) / 2, R = 2.6;
+  g.strokeStyle = "#1d2a2c"; g.beginPath(); g.moveTo(0, mid); g.lineTo(cw, mid); g.stroke();
+  g.font = "11px system-ui, sans-serif"; g.textBaseline = "bottom"; let x = 0;
+  for (const [name, q] of groups) {
+    g.fillStyle = "#78909c"; g.fillText(name, x + 2, chh);
+    for (const a of q) { const hgt = Math.max(-1, Math.min(1, a / R)) * (mid - 2); g.fillStyle = a >= 0 ? TEAL : AMBER; g.fillRect(x + 2, hgt >= 0 ? mid - hgt : mid, Math.max(step - 4, 2), Math.abs(hgt) || 1); x += step; }
+    x += step;
+  }
+}
+function strip(m) {
+  const r = m.recording, sc = m.scene || {}, b = m.base || [0, 0, 0], esc = t => String(t).replace(/[<&]/g, "");
+  $("f_rec").innerHTML = r && r.on ? '<span class="hot">● recording</span> episode ' + (r.episode == null ? "?" : r.episode) + ' <span class="k">step</span> ' + (r.ticks || 0) + ' <span class="k">· 30 a second</span>' : '<span class="k">not recording · tick</span> ' + m.tick;
+  $("f_phase").innerHTML = '<span class="k">story</span> ' + esc(sc.phase || "-") + ' <span class="k">grasp</span> ' + esc((m.assist && m.assist.state) || (sc.reach && sc.reach.stage) || "-") + (sc.pushing ? ' <span class="hot">pushing</span>' : "");
+  $("f_base").innerHTML = '<span class="k">robot at</span> x ' + b[0].toFixed(2) + ' y ' + b[1].toFixed(2) + ' <span class="k">facing</span> ' + (b[2] / rad).toFixed(0) + "°";
+  $("f_suit").innerHTML = m.suit_yaw == null ? '<span class="k">suit: no stream</span>' : '<span class="live">suit live</span> <span class="k">hips</span> ' + (m.suit_yaw / rad).toFixed(0) + "°" + ' <span class="k">arms</span> ' + (m.clutch_on ? "on" : "off");
+  $("f_head").innerHTML = head ? (head.flat ? '<span class="k">no headset: fixed camera (boxes approximate)</span>' : '<span class="k">head</span> ' + head.yaw.toFixed(0) + "° <span class=\"k\">left, up</span> " + head.pitch.toFixed(0) + "°") : "";
+  const cam = camera();
+  $("t_list").innerHTML = ((m.viz && m.viz.items) || []).map(it => {
+    const d = cam ? Math.hypot(it.pos[0] - cam.eye[0], it.pos[1] - cam.eye[1], it.pos[2] - cam.eye[2]) : null;
+    return '<div class="row">' + (it.held_by ? '<span class="hot">' + esc(it.name) + " · in the " + it.held_by + " hand</span>" : esc(it.name)) + (d == null ? "" : ' <span class="k">' + d.toFixed(1) + " m</span>") + "</div>";
+  }).join("") + (sc.chair ? '<div class="row">' + (sc.man === "bed" ? "the man · in bed" : "the man · " + esc(sc.man || "")) + "</div>" : "");
+  bars();
+}
+// The man's own view, from his eyes (a second camera in Unreal). Press M to show or hide it.
+function nextMan() {
+  const im = new Image();
+  im.onload = () => { if (im.naturalWidth) { $("man").src = im.src; document.body.classList.remove("nopic"); } setTimeout(nextMan, 60); };
+  im.onerror = () => setTimeout(nextMan, 700);
+  im.src = manUrl + "?t=" + Date.now();
+}
+nextMan();
+addEventListener("keydown", e => { const k = e.key.toLowerCase(); if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (k === "m") document.body.classList.toggle("one"); if (k === "b") document.body.classList.toggle("noboxes"); if (k === "d") document.body.classList.toggle("nodata"); });
+addEventListener("resize", () => { drawBoxes(); bars(); });
+setInterval(() => { const now = performance.now(); $("rate").textContent = Math.round(shown * 1000 / (now - t0)) + " pictures a second"; shown = 0; t0 = now; }, 2000);
+
+let audio = null, heard = null;
+function wakeAudio() { try { audio = audio || new (window.AudioContext || window.webkitAudioContext)(); if (audio.state === "suspended") audio.resume(); } catch (e) {} }
+addEventListener("pointerdown", wakeAudio); addEventListener("keydown", wakeAudio);
+function cough() {
+  if (!audio) return;
+  const n = 2 + (Math.random() < 0.5 ? 1 : 0);
+  for (let i = 0; i < n; i++) {
+    const t = audio.currentTime + 0.02 + i * (0.27 + Math.random() * 0.06), len = 0.22 + Math.random() * 0.06;
+    const buf = audio.createBuffer(1, Math.ceil(audio.sampleRate * len), audio.sampleRate), d = buf.getChannelData(0);
+    for (let k = 0; k < d.length; k++) d[k] = Math.random() * 2 - 1;
+    const src = audio.createBufferSource(); src.buffer = buf;
+    const body = audio.createBiquadFilter(); body.type = "bandpass"; body.frequency.value = 520 + Math.random() * 160; body.Q.value = 0.9;
+    const rasp = audio.createBiquadFilter(); rasp.type = "bandpass"; rasp.frequency.value = 1700 + Math.random() * 400; rasp.Q.value = 1.2;
+    const g = audio.createGain(), g2 = audio.createGain(); g2.gain.value = 0.45;
+    g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(i ? 0.8 : 1.0, t + 0.012); g.gain.exponentialRampToValueAtTime(0.001, t + len);
+    src.connect(body); body.connect(g); src.connect(rasp); rasp.connect(g2); g2.connect(g); g.connect(audio.destination);
+    const chest = audio.createOscillator(), cg = audio.createGain();          // the thump from the chest under each burst
+    chest.frequency.setValueAtTime(150, t); chest.frequency.exponentialRampToValueAtTime(70, t + 0.12);
+    cg.gain.setValueAtTime(0.0001, t); cg.gain.exponentialRampToValueAtTime(0.5, t + 0.01); cg.gain.exponentialRampToValueAtTime(0.001, t + 0.14);
+    chest.connect(cg); cg.connect(audio.destination);
+    src.start(t); chest.start(t); chest.stop(t + 0.16);
+  }
+}
+function bell() {
+  if (!audio) return;
+  const t = audio.currentTime + 0.01;
+  for (const [f, a, dur] of [[2090, 0.30, 1.3], [4180, 0.16, 0.8], [5630, 0.10, 0.5], [3140, 0.08, 0.9]]) {
+    const o = audio.createOscillator(), g = audio.createGain();
+    o.frequency.value = f; g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(a, t + 0.004); g.gain.exponentialRampToValueAtTime(0.0005, t + dur);
+    o.connect(g); g.connect(audio.destination); o.start(t); o.stop(t + dur + 0.05);
+  }
+}
+function sceneSounds(sc) {
+  if (sc.cough === undefined) return;
+  if (heard) { if (sc.cough > heard.cough) cough(); if (sc.bell > heard.bell) bell(); }
+  heard = { cough: sc.cough, bell: sc.bell };
+}
+$("sound").onclick = () => { wakeAudio(); $("sound").style.display = "none"; };
+const STORY = { tidy: "tidying up", cough: "he is coughing and ringing the bell", drink: "he is drinking", bed: "he is in bed" };
+// Reset scene: the robot back at the bedside table, sweater, glass, wheelchair and the man back where they start.
+let nodeWs = null;
+$("reset").onclick = () => { if (nodeWs && nodeWs.readyState === 1) { nodeWs.send('{"type":"scene","cue":"reset"}'); $("reset").textContent = "Reset ✓"; setTimeout(() => $("reset").textContent = "Reset scene", 1200); } };
+// Record: the node saves an episode (steps + pictures) while this is on. Its telemetry says how it stands:
+// recording = {on, episode, ticks} (30 ticks a second), or null when the node was started without --record.
+let rec = null;
+function showRec(r) {
+  rec = r || null;
+  const b = $("rec"), on = !!(rec && rec.on);
+  b.disabled = !rec;
+  b.title = rec ? "R: start or stop recording an episode" : "start the robot node with --record DIR";
+  b.classList.toggle("on", on);
+  b.textContent = on ? "Stop · episode " + (rec.episode == null ? "?" : rec.episode) + " · " + Math.floor((rec.ticks || 0) / 30) + " s" : "Record";
+}
+function toggleRec() { if (rec && nodeWs && nodeWs.readyState === 1) nodeWs.send(JSON.stringify({ type: "record", on: !rec.on })); }
+$("rec").onclick = toggleRec;
+addEventListener("keydown", e => { if (e.key.toLowerCase() === "r" && !e.repeat && !e.metaKey && !e.ctrlKey && !e.altKey) toggleRec(); });
+function connectNode() {
+  let n; try { n = new WebSocket(nodeUrl); } catch (e) { return; }
+  n.onopen = () => { nodeWs = n; };
+  n.onclose = () => { nodeWs = null; showRec(null); setTimeout(connectNode, 1500); };
+  n.onmessage = ev => {
+    if (ev.data.length > 20000) { n.send('{"type":"pov_ack"}'); return; }
+    try {
+      const m = JSON.parse(ev.data);
+      if (m.type !== "telemetry") return;
+      const sc = m.scene || {}, st = (m.assist && m.assist.state) || "", item = (m.task_target && m.task_target.name) || "";
+      tel = m; strip(m); drawBoxes();
+      showRec(m.recording);
+      sceneSounds(sc);
+      $("story").textContent = STORY[sc.phase] || "";
+      $("what").textContent = sc.reach ? (sc.reach.name === "glass of water" ? "picking up the glass of water" : "picking up the " + sc.reach.name) : sc.pushing ? "pushing the wheelchair"
+        : st === "holding" ? "holding the " + item : ["approach", "descend", "closing"].includes(st) ? "picking up the " + item
+        : m.pointed ? "pointing at the " + m.pointed : "robot's view";
+    } catch (e) {}
+  };
+}
+connectNode();
+</script></body></html>

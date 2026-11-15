@@ -1,0 +1,21 @@
+.env
+.env.*
+.venv/
+__pycache__/
+*.pyc
+logs/
+recordings/
+video/
+.DS_Store
+# Unreal: generated or downloaded, rebuilt by the scripts (see unreal/README.md)
+unreal/packaged/
+unreal/renders/
+unreal/RemoteHandsBedroom/Binaries/
+unreal/RemoteHandsBedroom/Build/
+unreal/RemoteHandsBedroom/Intermediate/
+unreal/RemoteHandsBedroom/Saved/
+unreal/RemoteHandsBedroom/DerivedDataCache/
+unreal/RemoteHandsBedroom/Content/
+unreal/RemoteHandsBedroom/SourceAssets/
+unreal/RemoteHandsBedroom/Plugins/*/Binaries/
+unreal/RemoteHandsBedroom/Plugins/*/Intermediate/

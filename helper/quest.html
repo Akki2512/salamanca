@@ -1,0 +1,381 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Robot eyes</title>
+<style>
+  html, body { margin:0; height:100%; background:#000; color:#eee; font:18px/1.4 system-ui, sans-serif; overflow:hidden; }
+  #eyes { position:fixed; inset:0; width:100%; height:100%; object-fit:contain; background:#000; }
+  #bar { position:fixed; left:0; right:0; bottom:0; padding:10px 16px; background:rgba(0,0,0,.55); display:flex; gap:16px; align-items:baseline; }
+  #task { flex:1; font-size:22px; font-weight:600; }
+  #stat { font-size:14px; color:#aaa; white-space:nowrap; }
+  [hidden] { display:none !important; }
+  #off { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; text-align:center; padding:24px; color:#bbb; }
+  #vr { right:150px; background:#2b7; border-color:#2b7; color:#012; font-weight:600; }
+  #help { position:fixed; top:64px; left:16px; right:16px; font-size:14px; color:#aaa; background:rgba(0,0,0,.5); padding:6px 10px; border-radius:8px; pointer-events:none; }
+  button { z-index:10; position:fixed; top:12px; right:12px; font:inherit; padding:8px 14px; border-radius:8px; border:1px solid #666; background:rgba(0,0,0,.5); color:#eee; }
+</style>
+</head>
+<body>
+<img id="eyes" alt="What the robot sees" hidden>
+<div id="off">Waiting for the robot's eyes…<br><small id="why"></small></div>
+<div id="bar"><div id="task"></div><div id="stat"></div></div>
+<button id="full">Full screen</button>
+<button id="vr">Enter VR</button>
+<div id="help">Enter VR: look around with your head. Point the right controller at an item and pull the trigger to pick it up; trigger again lets go. From behind the wheelchair, with nothing pointed at, the trigger takes hold of it to push. Left stick walks, right stick turns, A switches the arms on/off, hold B for 1.5 s to reset the scene. Here: W A S D walk, Q E turn, space = trigger, 1 start over, 2 cough, 3 drink, 4 bed.</div>
+<script>
+// The robot's-eye picture from Unreal. Unreal serves its newest frame at /eyes.jpg; this page asks for the next
+// one as soon as the last has arrived, so it runs as fast as the link allows and never builds a backlog.
+const q = new URLSearchParams(location.search);
+const host = location.hostname || "127.0.0.1";
+const eyesUrl = q.get("eyes") || "http://" + host + ":8011/eyes.jpg";
+const $ = id => document.getElementById(id);
+let shown = 0, t0 = performance.now(), fails = 0, lastOk = 0;
+let latest = null, latestSeq = 0;           // newest decoded frame, for the VR screen
+let inVR = false, xrSession = null, vrError = "";
+function next() {
+  if (inVR) { setTimeout(next, 300); return; }      // in VR the head-following loop below fetches the frames
+  const im = new Image();
+  im.crossOrigin = "anonymous";           // the frames come from Unreal's port: without this WebGL refuses to draw them in VR
+  const asked = performance.now();
+  im.onload = () => {
+    if (im.naturalWidth > 1) {
+      $("eyes").src = im.src; $("eyes").hidden = false; $("off").hidden = true;
+      latest = im; latestSeq++;
+      shown++; fails = 0; lastOk = performance.now();
+      const dt = (performance.now() - t0) / 1000;
+      if (dt >= 1) { $("stat").textContent = (shown / dt).toFixed(0) + " frames/s · " + Math.round(performance.now() - asked) + " ms"; shown = 0; t0 = performance.now(); }
+      setTimeout(next, Math.max(0, 30 - (performance.now() - asked)));     // Unreal renders about 24 a second: no point asking faster
+    } else { setTimeout(next, 100); }
+  };
+  im.onerror = () => {
+    fails++;
+    if (performance.now() - lastOk > 1500) { $("eyes").hidden = true; $("off").hidden = false; $("why").textContent = "No picture from " + eyesUrl; $("stat").textContent = ""; }
+    setTimeout(next, Math.min(1000, 100 * fails));
+  };
+  im.src = eyesUrl + "?t=" + Date.now();
+}
+next();
+// What the person asked for, from the session server (same messages the worker's station gets).
+const session = q.get("session") || "default";
+function connect() {
+  const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws/helper?session=" + encodeURIComponent(session));
+  ws.onclose = () => setTimeout(connect, 1500);
+  ws.onmessage = ev => {
+    const m = JSON.parse(ev.data);
+    if (m.type === "task") $("task").textContent = m.instruction || m.say || "";
+    else if (m.type === "status" && (m.state === "done" || m.state === "failed")) $("task").textContent = m.say || "";
+  };
+}
+connect();
+// ---------------------------------------------------------------- walking the robot from here
+// The robot node takes {"type":"drive", vx, vy, wz}: forward and left in m/s, turn in rad/s, repeated several
+// times a second (it stops 0.35 s after the last one). Sources: the controllers' thumbsticks in VR, or keys.
+const nodeUrl = q.get("node") || "ws://" + host + ":8765";
+let node = null, clutchOn = false;
+let robot = { pointed: "", state: "", item: "", scene: {} };      // what the robot node says: item under the pointer, pick stage, item being picked
+function connectNode() {
+  let n; try { n = new WebSocket(nodeUrl); } catch (e) { return; }
+  n.onopen = () => { node = n; };
+  n.onclose = () => { node = null; setTimeout(connectNode, 1500); };
+  n.onmessage = ev => {
+    if (ev.data.length > 20000) { n.send('{"type":"pov_ack"}'); return; }     // the node's own camera frames: not shown here
+    try {
+      const m = JSON.parse(ev.data);
+      if (m.type === "telemetry") {
+        clutchOn = !!m.clutch_on;
+        robot = { pointed: m.pointed || "", state: (m.assist && m.assist.state) || "", item: (m.task_target && m.task_target.name) || "", scene: m.scene || {}, suitYaw: m.suit_yaw, suitHeadRel: m.suit_head_rel };
+        sceneSounds(robot.scene);
+      }
+    } catch (e) {}
+  };
+}
+connectNode();
+
+// ---------------------------------------------------------------- the scene's sounds: the man's cough and his bell
+// Made here (no sound files): a cough is two or three bursts of filtered noise, the bell a few ringing tones.
+// The robot node counts coughs and rings (telemetry scene.cough / scene.bell); each step plays one.
+let audio = null, heard = null;
+function wakeAudio() { try { audio = audio || new (window.AudioContext || window.webkitAudioContext)(); if (audio.state === "suspended") audio.resume(); } catch (e) {} }
+addEventListener("pointerdown", wakeAudio); addEventListener("keydown", wakeAudio);
+function cough() {
+  if (!audio) return;
+  const n = 2 + (Math.random() < 0.5 ? 1 : 0);
+  for (let i = 0; i < n; i++) {
+    const t = audio.currentTime + 0.02 + i * (0.27 + Math.random() * 0.06), len = 0.22 + Math.random() * 0.06;
+    const buf = audio.createBuffer(1, Math.ceil(audio.sampleRate * len), audio.sampleRate), d = buf.getChannelData(0);
+    for (let k = 0; k < d.length; k++) d[k] = Math.random() * 2 - 1;
+    const src = audio.createBufferSource(); src.buffer = buf;
+    const body = audio.createBiquadFilter(); body.type = "bandpass"; body.frequency.value = 520 + Math.random() * 160; body.Q.value = 0.9;
+    const rasp = audio.createBiquadFilter(); rasp.type = "bandpass"; rasp.frequency.value = 1700 + Math.random() * 400; rasp.Q.value = 1.2;
+    const g = audio.createGain(), g2 = audio.createGain(); g2.gain.value = 0.45;
+    g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(i ? 0.8 : 1.0, t + 0.012); g.gain.exponentialRampToValueAtTime(0.001, t + len);
+    src.connect(body); body.connect(g); src.connect(rasp); rasp.connect(g2); g2.connect(g); g.connect(audio.destination);
+    const chest = audio.createOscillator(), cg = audio.createGain();          // the thump from the chest under each burst
+    chest.frequency.setValueAtTime(150, t); chest.frequency.exponentialRampToValueAtTime(70, t + 0.12);
+    cg.gain.setValueAtTime(0.0001, t); cg.gain.exponentialRampToValueAtTime(0.5, t + 0.01); cg.gain.exponentialRampToValueAtTime(0.001, t + 0.14);
+    chest.connect(cg); cg.connect(audio.destination);
+    src.start(t); chest.start(t); chest.stop(t + 0.16);
+  }
+}
+function bell() {
+  if (!audio) return;
+  const t = audio.currentTime + 0.01;
+  for (const [f, a, dur] of [[2090, 0.30, 1.3], [4180, 0.16, 0.8], [5630, 0.10, 0.5], [3140, 0.08, 0.9]]) {
+    const o = audio.createOscillator(), g = audio.createGain();
+    o.frequency.value = f; g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(a, t + 0.004); g.gain.exponentialRampToValueAtTime(0.0005, t + dur);
+    o.connect(g); g.connect(audio.destination); o.start(t); o.stop(t + dur + 0.05);
+  }
+}
+function sceneSounds(sc) {
+  if (sc.cough === undefined) return;
+  if (heard) { if (sc.cough > heard.cough) cough(); if (sc.bell > heard.bell) bell(); }
+  heard = { cough: sc.cough, bell: sc.bell };
+}
+// The stage manager's keys (on the laptop): 1 start over, 2 he coughs now, 3 he drinks, 4 he is in bed; space = the trigger.
+addEventListener("keydown", e => {
+  const cue = { "1": "reset", "2": "cough", "3": "drink", "4": "bed" }[e.key];
+  if (!node || node.readyState !== 1 || e.repeat) return;
+  if (cue) node.send(JSON.stringify({ type: "scene", cue }));
+  if (e.key === " ") { e.preventDefault(); node.send(JSON.stringify({ type: "point", yaw: 0, pitch: 60, press: true })); }
+});
+let lastDrive = 0, wasDriving = false;
+function drive(vx, vy, wz) {
+  const going = Math.abs(vx) + Math.abs(vy) + Math.abs(wz) > 0.001;
+  const now = performance.now();
+  if (!node || node.readyState !== 1 || (!going && !wasDriving) || now - lastDrive < 60) return;
+  lastDrive = now; wasDriving = going;
+  node.send(JSON.stringify({ type: "drive", vx, vy, wz }));
+}
+const keys = new Set();
+addEventListener("keydown", e => keys.add(e.key.toLowerCase()));
+addEventListener("keyup", e => keys.delete(e.key.toLowerCase()));
+setInterval(() => {
+  if (inVR) return;
+  const k = c => keys.has(c) ? 1 : 0;
+  drive(0.6 * (k("w") - k("s")), 0.4 * (k("a") - k("d")), 1.2 * (k("q") - k("e")));
+}, 66);
+
+// ---------------------------------------------------------------- VR: the robot's view on a big screen around you
+// A screen 4 m wide, 2 m in front (so it fills about 90 degrees of your view), fixed in space where you were
+// looking when you entered. Plain WebGL: no libraries, the headset may have no internet.
+
+let bSince = 0, bDone = false, headOff = null, lastSuit = null, headT = 0, headAbs = 0;
+const dead = v => Math.abs(v) < 0.15 ? 0 : (v - Math.sign(v) * 0.15) / 0.85;
+function mul(a, b) { const o = new Float32Array(16); for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) { let x = 0; for (let k = 0; k < 4; k++) x += a[k * 4 + r] * b[c * 4 + k]; o[c * 4 + r] = x; } return o; }
+async function enterVR() {
+  if (!navigator.xr || !(await navigator.xr.isSessionSupported("immersive-vr"))) { $("help").textContent = "This browser has no VR mode (open the page in the headset's own browser)."; return; }
+  const canvas = document.createElement("canvas");
+  const gl = canvas.getContext("webgl", { xrCompatible: true, antialias: true });
+  wakeAudio();
+  const session = await navigator.xr.requestSession("immersive-vr");
+  xrSession = session;
+  try { await startVR(session, gl); }
+  catch (e) { try { await session.end(); } catch (_) {} xrSession = null; throw e; }       // never leave a dead session open
+}
+// Where the wearer's head points (degrees: yaw to the left, pitch up), sent with every frame request so the
+// robot's camera in Unreal looks the same way; and the newest frame with the direction it was rendered at.
+let head = { yaw: 0, pitch: 0 }, vrFrame = null, vrShown = 0, vrT0 = 0, vrSeq = 0;
+async function vrFrames() {
+  while (inVR) {
+    try {
+      // what is asked for (the view relative to the robot's body) and where the head really points in the headset's
+      // own space at that moment: the picture that comes back is put there, not at the relative angle
+      const sent = { rel: head.yaw, abs: headAbs };
+      const r = await fetch(eyesUrl + "?vr=1&y=" + sent.rel.toFixed(1) + "&p=" + head.pitch.toFixed(1) + "&t=" + Date.now(), { cache: "no-store" });
+      if (r.status !== 200) { await new Promise(res => setTimeout(res, 100)); continue; }
+      const tag = (r.headers.get("X-Head") || "flat").split(",").map(Number);
+      const seq = Number(r.headers.get("X-Frame") || 0);
+      if (seq && seq <= vrSeq) { await r.arrayBuffer(); await new Promise(res => setTimeout(res, 8)); continue; }    // nothing new yet
+      const bmp = await createImageBitmap(await r.blob(), { imageOrientation: "flipY" });
+      if (seq && seq <= vrSeq) { if (bmp.close) bmp.close(); continue; }      // the other loop got a newer one in first
+      vrSeq = seq || vrSeq;
+      if (vrFrame && vrFrame.bmp.close) vrFrame.bmp.close();
+      // tag[0] is the relative angle the picture was really rendered at (it can be a request or two behind):
+      // in the headset's space that is where the head pointed for `sent`, shifted by the difference
+      const turn = a => ((a + 180) % 360 + 360) % 360 - 180;
+      vrFrame = tag.length === 4 && !isNaN(tag[0]) ? { bmp, yaw: sent.abs + turn(tag[0] - sent.rel), pitch: tag[1], hfov: tag[2], aspect: tag[3], fresh: true }
+                                                    : { bmp, yaw: sent.abs, pitch: 0, hfov: 90, aspect: bmp.width / bmp.height, fresh: true };
+      vrError = "";
+    } catch (e) { vrError = String(e.message || e); await new Promise(res => setTimeout(res, 150)); }
+  }
+}
+async function startVR(session, gl) {
+  if (gl.makeXRCompatible) await gl.makeXRCompatible();
+  session.updateRenderState({ baseLayer: new XRWebGLLayer(session, gl) });
+  const ref = await session.requestReferenceSpace("local");
+  const sh = (type, src) => { const x = gl.createShader(type); gl.shaderSource(x, src); gl.compileShader(x); return x; };
+  const prog = gl.createProgram();
+  gl.attachShader(prog, sh(gl.VERTEX_SHADER, "attribute vec3 p; attribute vec2 uv; uniform mat4 m; varying vec2 v; void main(){ gl_Position = m * vec4(p, 1.0); v = uv; }"));
+  gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, "precision mediump float; uniform sampler2D t; varying vec2 v; void main(){ gl_FragColor = texture2D(t, v); }"));
+  gl.linkProgram(prog); gl.useProgram(prog);
+  const buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  const quad = new Float32Array(20);
+  gl.bufferData(gl.ARRAY_BUFFER, quad, gl.DYNAMIC_DRAW);
+  const ap = gl.getAttribLocation(prog, "p"), au = gl.getAttribLocation(prog, "uv"), um = gl.getUniformLocation(prog, "m");
+  gl.enableVertexAttribArray(ap); gl.vertexAttribPointer(ap, 3, gl.FLOAT, false, 20, 0);
+  gl.enableVertexAttribArray(au); gl.vertexAttribPointer(au, 2, gl.FLOAT, false, 20, 12);
+  const tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 0, 255]));
+  // The picture is drawn on a flat panel 3 m away, placed in the direction the robot's camera was pointing when
+  // that frame was rendered, and as wide as the camera's field of view. So it stays put while you turn your
+  // head, and the next frames arrive already looking where you now look.
+  const D = 3.0, rad = Math.PI / 180;
+  // A flat panel hw x hh (half sizes, m) at distance `dist`, in the direction yaw (left) / pitch (up), offset
+  // (dx, dy) within its own plane.
+  function panel(target, yaw, pitch, hw, hh, dist, dx = 0, dy = 0) {
+    const a = yaw * rad, p = pitch * rad;
+    [[-hw, -hh, 0, 0], [hw, -hh, 1, 0], [-hw, hh, 0, 1], [hw, hh, 1, 1]].forEach(([x0, y0, u, v], i) => {
+      const x = x0 + dx, y = y0 + dy, z = -dist;
+      const y1 = y * Math.cos(p) - z * Math.sin(p), z1 = y * Math.sin(p) + z * Math.cos(p);     // tip up by the pitch
+      target.set([x * Math.cos(a) + z1 * Math.sin(a), y1, -x * Math.sin(a) + z1 * Math.cos(a), u, v], i * 5);   // then turn left by the yaw
+    });
+  }
+  function place(f) {
+    const hw = D * Math.tan(f.hfov * rad / 2);
+    panel(quad, f.yaw, f.pitch, hw, hw / f.aspect, D);
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf); gl.bufferSubData(gl.ARRAY_BUFFER, 0, quad);
+  }
+  place({ yaw: 0, pitch: 0, hfov: 90, aspect: 16 / 9 });
+  // The pointer: a dot where the right controller points, and under it the name of the item it is on (or what
+  // the robot is doing with it). Drawn just in front of the picture.
+  const mk = () => { const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE); return t; };
+  const cv = document.createElement("canvas"); cv.width = 512; cv.height = 128;
+  const cx = cv.getContext("2d");
+  const dotTex = mk(), labelTex = mk(), small = new Float32Array(20), buf2 = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf2); gl.bufferData(gl.ARRAY_BUFFER, small, gl.DYNAMIC_DRAW);
+  let dotColour = "", labelText = null;
+  function paint(tex, draw) { cx.clearRect(0, 0, 512, 128); draw(); gl.bindTexture(gl.TEXTURE_2D, tex); gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, cv); gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false); }
+  function drawSmall(tex, yaw, pitch, hw, hh, dy) {
+    panel(small, yaw, pitch, hw, hh, D - 0.05, 0, dy);
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf2); gl.bufferSubData(gl.ARRAY_BUFFER, 0, small);
+    gl.vertexAttribPointer(ap, 3, gl.FLOAT, false, 20, 0); gl.vertexAttribPointer(au, 2, gl.FLOAT, false, 20, 12);
+    gl.bindTexture(gl.TEXTURE_2D, tex); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+  let aim = null, trigWas = false, lastPoint = 0;
+  let aWas = false;
+  inVR = true; vrFrame = null;
+  vrFrames(); vrFrames();       // two at once: one is decoding while the other is already asking for the next picture
+  session.addEventListener("end", () => { inVR = false; xrSession = null; drive(0, 0, 0); });
+  const onFrame = (time, frame) => {
+    session.requestAnimationFrame(onFrame);
+    // thumbsticks: left walks, right turns; A (or X) switches the arms' clutch
+    let vx = 0, vy = 0, wz = 0, a = false, trig = false, ray = null, bHeld = false;
+    for (const src of session.inputSources) {
+      const gp = src.gamepad; if (!gp) continue;
+      const x = dead(gp.axes[2] || 0), y = dead(gp.axes[3] || 0);
+      if (src.handedness === "left") { vx += -0.6 * y; vy += -0.4 * x; } else { wz += -1.2 * x; vx += -0.3 * y; }
+      a = a || !!(gp.buttons[4] && gp.buttons[4].pressed);
+      bHeld = bHeld || !!(gp.buttons[5] && gp.buttons[5].pressed);
+      if (src.handedness === "right") {
+        trig = !!(gp.buttons[0] && gp.buttons[0].pressed);
+        const rp = src.targetRaySpace ? frame.getPose(src.targetRaySpace, ref) : null;
+        if (rp) ray = rp.transform;
+      }
+    }
+    drive(vx, vy, wz);
+    // B (or Y) held for a second and a half: reset the whole scene to its start
+    if (!bHeld) { bSince = 0; bDone = false; }
+    else if (!bSince) bSince = time;
+    else if (!bDone && time - bSince > 1500 && node && node.readyState === 1) { bDone = true; node.send('{"type":"scene","cue":"reset"}'); }
+    if (a && !aWas && node && node.readyState === 1) node.send(JSON.stringify({ type: "clutch", on: !clutchOn }));
+    aWas = a;
+    const pose = frame.getViewerPose(ref); if (!pose) return;
+    // Where the right controller points, as a direction from your eyes: the spot its ray hits the picture's
+    // distance. That same direction, from the robot's eyes, is what the robot node matches items against.
+    aim = null;
+    if (ray) {
+      const q = ray.orientation, o = ray.position, h = pose.transform.position;
+      const dx = -2 * (q.x * q.z + q.w * q.y), dy = -2 * (q.y * q.z - q.w * q.x), dz = -(1 - 2 * (q.x * q.x + q.y * q.y));
+      const ox = o.x - h.x, oy = o.y - h.y, oz = o.z - h.z;
+      const b = ox * dx + oy * dy + oz * dz, c = ox * ox + oy * oy + oz * oz - D * D;
+      const t = -b + Math.sqrt(Math.max(0, b * b - c));
+      const px = ox + t * dx, py = oy + t * dy, pz = oz + t * dz;
+      aim = { yaw: Math.atan2(-px, -pz) / rad, pitch: Math.asin(Math.max(-1, Math.min(1, py / D))) / rad };
+      const press = trig && !trigWas;
+      if (node && node.readyState === 1 && (press || time - lastPoint > 60)) {
+        lastPoint = time;
+        // the robot node wants the direction from the robot's own facing: the pointer's direction in the headset's
+        // space, less the same offset the view has (headAbs - head.yaw)
+        const relYaw = ((aim.yaw - (headAbs - head.yaw) + 180) % 360 + 360) % 360 - 180;
+        node.send(JSON.stringify({ type: "point", yaw: relYaw, pitch: aim.pitch, press }));
+      }
+    }
+    trigWas = trig;
+    // which way the head points: forward is -z turned by the head's orientation
+    const o = pose.transform.orientation;
+    const fx = -2 * (o.x * o.z + o.w * o.y), fy = -2 * (o.y * o.z - o.w * o.x), fz = -(1 - 2 * (o.x * o.x + o.y * o.y));
+    let hy = Math.atan2(-fx, -fz) / rad;
+    headAbs = hy;                       // where the head points in the headset's own space: where the picture belongs
+    // With the suit driving, the robot turns with the wearer's hips, and the headset's heading includes that same
+    // turn: sent as it is, the view would turn twice. So the view is sent relative to the hips:
+    //     (headset heading) - (suit's hips heading) - offset
+    // The offset between the headset's frame and the suit's is taken when the arms are switched on (A), with the
+    // wearer looking straight ahead; switching off and on again re-centres. It is kept through gaps in the suit's
+    // data. The suit's frame drifts slowly, so the offset is also pulled, very slowly (45 s), towards the wearer
+    // looking straight ahead on average. (The suit's own head sensor was tried as the reference and is not used:
+    // on 15 Nov it read 100 degrees off after the headset had been taken off and put back on.)
+    const wrap = a => ((a + 180) % 360 + 360) % 360 - 180;
+    if (robot.suitYaw !== null && robot.suitYaw !== undefined) lastSuit = { yaw: robot.suitYaw / rad };
+    if (!clutchOn) { headOff = null; lastSuit = null; }
+    else if (lastSuit) {
+      const d = hy - lastSuit.yaw;
+      if (headOff === null) headOff = d;
+      else headOff += wrap(d - headOff) * Math.min(1, Math.max(0, time - headT) / 45000);
+      hy = d - headOff;
+    }
+    headT = time;
+    hy = wrap(hy);
+    head = { yaw: hy, pitch: Math.asin(Math.max(-1, Math.min(1, fy))) / rad };
+    const layer = session.renderState.baseLayer;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, layer.framebuffer);
+    gl.clearColor(0, 0, 0, 1); gl.clear(gl.COLOR_BUFFER_BIT);
+    if (vrFrame && vrFrame.fresh) {
+      vrFrame.fresh = false;
+      try { gl.bindTexture(gl.TEXTURE_2D, tex); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, vrFrame.bmp); place(vrFrame); vrShown++; }
+      catch (e) { vrError = String(e.message || e); }
+    }
+    // the pointer's dot and label: repainted only when they change
+    const busy = ["approach", "descend", "closing"].includes(robot.state), holding = robot.state === "holding";
+    const colour = holding ? "#ffb020" : busy ? "#ffd23f" : robot.pointed ? "#3ddc84" : "#ffffff";
+    const sc = robot.scene || {};
+    const text = sc.reach ? (sc.reach.name === "glass of water" ? "picking up the glass of water" : "picking up the " + sc.reach.name) : sc.pushing ? "pushing the wheelchair · trigger lets go"
+               : sc.glass === "give" ? "holding the water · trigger gives it to him" : holding ? "holding the " + robot.item + " · trigger lets go" : busy ? "picking up the " + robot.item
+               : robot.state === "releasing" ? "letting go" : robot.pointed ? robot.pointed + " · trigger picks it up"
+               : sc.glass === "give" ? "trigger gives him the water" : sc.glass === "pick" ? "trigger picks up the glass of water"
+               : sc.can_push ? "trigger takes hold of the wheelchair" : "";
+    if (colour !== dotColour) { dotColour = colour; paint(dotTex, () => { cx.fillStyle = colour; cx.beginPath(); cx.arc(256, 64, 40, 0, 7); cx.fill();
+      cx.lineWidth = 8; cx.strokeStyle = "rgba(0,0,0,.6)"; cx.stroke(); }); }
+    if (text !== labelText) { labelText = text; paint(labelTex, () => { if (!text) return; cx.font = "600 44px system-ui, sans-serif"; cx.textAlign = "center"; cx.textBaseline = "middle";
+      const w = Math.min(500, cx.measureText(text).width + 40); cx.fillStyle = "rgba(0,0,0,.65)"; cx.fillRect(256 - w / 2, 24, w, 80);
+      cx.fillStyle = colour; cx.fillText(text, 256, 66, 480); }); }
+    gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    for (const view of pose.views) {
+      const vp = layer.getViewport(view); gl.viewport(vp.x, vp.y, vp.width, vp.height);
+      // The picture is only right seen from the point it was rendered from, so it (and the pointer) is kept
+      // centred on the wearer's head, wherever they have walked to, not on the spot where VR was entered.
+      const hp = pose.transform.position;
+      const atHead = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, hp.x, hp.y, hp.z, 1]);
+      gl.uniformMatrix4fv(um, false, mul(mul(view.projectionMatrix, view.transform.inverse.matrix), atHead));
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+      gl.vertexAttribPointer(ap, 3, gl.FLOAT, false, 20, 0); gl.vertexAttribPointer(au, 2, gl.FLOAT, false, 20, 12);
+      gl.bindTexture(gl.TEXTURE_2D, tex); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      if (aim) {
+        drawSmall(dotTex, aim.yaw, aim.pitch, 0.16, 0.04, 0);           // the dot (its texture is 4:1, the dot in the middle)
+        if (labelText) drawSmall(labelTex, aim.yaw, aim.pitch, 0.52, 0.13, -0.22);
+      }
+    }
+  };
+  session.requestAnimationFrame(onFrame);
+}
+$("vr").onclick = () => enterVR().catch(e => { $("help").textContent = "VR did not start: " + e.message; });
+$("full").onclick = () => { (document.documentElement.requestFullscreen || (() => {})).call(document.documentElement); $("full").hidden = true; };
+</script>
+</body>
+</html>

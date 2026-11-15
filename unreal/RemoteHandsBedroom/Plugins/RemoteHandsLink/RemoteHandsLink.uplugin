@@ -1,0 +1,15 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "0.1",
+	"FriendlyName": "Remote Hands Link",
+	"Description": "Receives the Remote Hands robot node's state over UDP and poses a Unitree G1 and the items in the level.",
+	"Category": "Remote Hands",
+	"CreatedBy": "Remote Hands (Junction 2026)",
+	"CanContainContent": false,
+	"IsBetaVersion": true,
+	"Installed": false,
+	"Modules": [
+		{ "Name": "RemoteHandsLink", "Type": "Runtime", "LoadingPhase": "Default" }
+	]
+}

@@ -1,0 +1,11 @@
+# Python 3.12. The robot interface (kinematics, mock simulator, safety) comes from the Aalto humanoid repo: see README.
+numpy
+pin            # Pinocchio: the G1's kinematics
+scipy
+pyyaml
+websockets
+fastapi
+uvicorn
+httpx
+pillow
+pyarrow        # only for tools/export_lerobot.py

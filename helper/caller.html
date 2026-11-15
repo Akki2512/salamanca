@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Remote Hands: ask for help</title>
+<style>
+  :root { --bg:#f6f5f1; --card:#fff; --ink:#1d1d1b; --mute:#6b6a65; --line:#dcdad2; --accent:#1d6b54; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#161614; --card:#20201d; --ink:#eeede8; --mute:#a09f98; --line:#3a3935; --accent:#5dcaa5; } }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:20px/1.5 system-ui, sans-serif; }
+  main { max-width:560px; margin:0 auto; padding:24px 16px; display:grid; gap:16px; }
+  h1 { font-size:26px; margin:0; }
+  #said { font-size:22px; min-height:1.5em; color:var(--mute); }
+  #status { font-size:26px; font-weight:600; min-height:3em; }
+  button { font:inherit; font-size:24px; padding:22px; border-radius:16px; border:0; background:var(--accent); color:#fff; font-weight:600; cursor:pointer; width:100%; }
+  @media (prefers-color-scheme: dark) { button { color:#0c2a21; } }
+  button:disabled { opacity:.5; }
+  form { display:flex; gap:8px; } input { flex:1; min-width:0; font:inherit; padding:12px; border-radius:12px; border:1px solid var(--line); background:var(--card); color:var(--ink); }
+  form button { width:auto; font-size:20px; padding:12px 18px; }
+  small { color:var(--mute); font-size:15px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Ask for help</h1>
+  <button id="talk">Hold to speak</button>
+  <div id="said">Say what you need, for example “pass me the blue one”.</div>
+  <form id="f"><input id="text" placeholder="or type it here" autocomplete="off"><button>Send</button></form>
+  <div id="status" aria-live="polite"></div>
+  <small id="conn">Connecting…</small>
+</main>
+<script>
+const session = new URLSearchParams(location.search).get("session") || "default";
+const $ = id => document.getElementById(id);
+let ws;
+function say(text) { if (!text) return; $("status").textContent = text; try { speechSynthesis.cancel(); speechSynthesis.speak(new SpeechSynthesisUtterance(text)); } catch (e) {} }
+function connect() {
+  ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws/caller?session=" + encodeURIComponent(session));
+  ws.onopen = () => $("conn").textContent = "Connected.";
+  ws.onclose = () => { $("conn").textContent = "Connection lost. Reconnecting…"; setTimeout(connect, 1000); };
+  ws.onmessage = ev => { const m = JSON.parse(ev.data);
+    if (m.type === "status" && m.say) say(m.say);
+    if (m.type === "presence") $("conn").textContent = "Connected. " + (m.helper ? "A helper is online." : "No helper online yet.") + (m.robot ? "" : " The robot is offline."); };
+}
+function send(text) { text = text.trim(); if (!text || !ws || ws.readyState !== 1) return; $("said").textContent = "“" + text + "”"; ws.send(JSON.stringify({ type:"request", text })); }
+$("f").onsubmit = e => { e.preventDefault(); send($("text").value); $("text").value = ""; };
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+if (SR) {
+  const rec = new SR(); rec.lang = "en-US"; rec.interimResults = false;
+  rec.onresult = e => send(e.results[0][0].transcript);
+  rec.onerror = e => { $("said").textContent = "I couldn't hear that (" + e.error + "). You can type it instead."; };
+  const start = e => { e.preventDefault(); try { rec.start(); $("talk").textContent = "Listening…"; } catch (err) {} };
+  const stop = e => { e.preventDefault(); rec.stop(); $("talk").textContent = "Hold to speak"; };
+  $("talk").addEventListener("pointerdown", start); $("talk").addEventListener("pointerup", stop); $("talk").addEventListener("pointerleave", stop);
+} else { $("talk").disabled = true; $("talk").textContent = "Speech not available here: type instead"; }
+connect();
+</script>
+</body>
+</html>
